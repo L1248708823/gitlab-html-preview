@@ -1,6 +1,10 @@
 import { ChevronDown, ChevronRight, FileCode2, FileText, Folder, FolderOpen, LoaderCircle, PanelRightClose, PanelRightOpen, Search, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { blobFileUrl, listTree, rawFileUrl, type Repository, type TreeEntry } from '../../lib/repository';
+
+const DEFAULT_WIDTH = 284;
+const MIN_WIDTH = 220;
+const WIDTH_STORAGE_KEY = 'workspace-width';
 
 type Directory = { status: 'loading' } | { status: 'loaded'; entries: TreeEntry[] } | { status: 'error' };
 type SearchIndex = { status: 'idle' } | { status: 'loading' } | { status: 'loaded'; entries: TreeEntry[] } | { status: 'error' };
@@ -20,6 +24,29 @@ export function Workspace({ repository, error, currentPath, onSelect }: Workspac
   const [searchIndex, setSearchIndex] = useState<SearchIndex>({ status: 'idle' });
   const [searchAttempt, setSearchAttempt] = useState(0);
   const [searchStarted, setSearchStarted] = useState(false);
+  const [preferredWidth, setPreferredWidth] = useState(() => {
+    const saved = Number(localStorage.getItem(WIDTH_STORAGE_KEY));
+    return Number.isFinite(saved) && saved > 0 ? saved : DEFAULT_WIDTH;
+  });
+  const [viewportWidth, setViewportWidth] = useState(window.innerWidth);
+  const drag = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+  const maxWidth = Math.floor(viewportWidth - Math.min(320, viewportWidth / 2));
+  const minWidth = Math.min(MIN_WIDTH, maxWidth);
+  const width = Math.max(minWidth, Math.min(preferredWidth, maxWidth));
+
+  useEffect(() => {
+    const updateViewportWidth = () => setViewportWidth(window.innerWidth);
+    window.addEventListener('resize', updateViewportWidth);
+    return () => window.removeEventListener('resize', updateViewportWidth);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem(WIDTH_STORAGE_KEY, String(preferredWidth));
+  }, [preferredWidth]);
+
+  function resize(nextWidth: number) {
+    setPreferredWidth(Math.max(minWidth, Math.min(Math.round(nextWidth), maxWidth)));
+  }
 
   async function load(path: string) {
     if (!repository) return;
@@ -77,12 +104,12 @@ export function Workspace({ repository, error, currentPath, onSelect }: Workspac
   function renderDirectory(path: string, depth: number) {
     const directory = directories[path];
     if (!directory || directory.status === 'loading') {
-      return <div className="tree-message" style={{ paddingLeft: 16 + depth * 16 }}><LoaderCircle className="tree-spinner" size={15} />加载中</div>;
+      return <div className="tree-message" style={{ paddingLeft: 16 + depth * 12 }}><LoaderCircle className="tree-spinner" size={15} />加载中</div>;
     }
     if (directory.status === 'error') {
-      return <button className="tree-message tree-retry" style={{ paddingLeft: 16 + depth * 16 }} onClick={() => void load(path)}>加载失败，点击重试</button>;
+      return <button className="tree-message tree-retry" style={{ paddingLeft: 16 + depth * 12 }} onClick={() => void load(path)}>加载失败，点击重试</button>;
     }
-    if (!directory.entries.length) return <div className="tree-message" style={{ paddingLeft: 16 + depth * 16 }}>空文件夹</div>;
+    if (!directory.entries.length) return <div className="tree-message" style={{ paddingLeft: 16 + depth * 12 }}>空文件夹</div>;
     return directory.entries.map((entry) => {
       const isFolder = entry.type === 'tree';
       const isHtml = /\.html?$/i.test(entry.name);
@@ -95,7 +122,7 @@ export function Workspace({ repository, error, currentPath, onSelect }: Workspac
           {isFolder || isPreviewable ? (
             <button
               className={`tree-item${isActive ? ' tree-item--active' : ''}`}
-              style={{ paddingLeft: 14 + depth * 16 }}
+              style={{ paddingLeft: 14 + depth * 12 }}
               onClick={() => isFolder ? toggleFolder(entry.path) : repository && onSelect(rawFileUrl(repository, entry.path), entry.path)}
               aria-expanded={isFolder ? isOpen : undefined}
               aria-current={isActive ? 'page' : undefined}
@@ -108,7 +135,7 @@ export function Workspace({ repository, error, currentPath, onSelect }: Workspac
           ) : (
             <a
               className="tree-item"
-              style={{ paddingLeft: 14 + depth * 16 }}
+              style={{ paddingLeft: 14 + depth * 12 }}
               href={repository ? blobFileUrl(repository, entry.path) : undefined}
               target="_blank"
               rel="noopener noreferrer"
@@ -150,7 +177,39 @@ export function Workspace({ repository, error, currentPath, onSelect }: Workspac
   if (hidden) return <button className="workspace-toggle" type="button" onClick={() => setHidden(false)} aria-label="打开文件栏" title="打开文件栏"><PanelRightOpen size={19} strokeWidth={1.6} /></button>;
 
   return (
-    <aside className="workspace" aria-label="仓库文件">
+    <aside id="workspace" className="workspace" aria-label="仓库文件" style={{ width }}>
+      <div
+        className="workspace__resize"
+        role="separator"
+        tabIndex={0}
+        aria-label="调整文件栏宽度"
+        aria-controls="workspace"
+        aria-orientation="vertical"
+        aria-valuemin={minWidth}
+        aria-valuemax={maxWidth}
+        aria-valuenow={width}
+        aria-valuetext={`${width} 像素`}
+        onPointerDown={(event) => {
+          if (event.button !== 0) return;
+          event.preventDefault();
+          event.currentTarget.setPointerCapture(event.pointerId);
+          drag.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: width };
+        }}
+        onPointerMove={(event) => {
+          if (drag.current?.pointerId === event.pointerId) resize(drag.current.startWidth + drag.current.startX - event.clientX);
+        }}
+        onPointerUp={(event) => { if (drag.current?.pointerId === event.pointerId) drag.current = null; }}
+        onPointerCancel={() => { drag.current = null; }}
+        onLostPointerCapture={() => { drag.current = null; }}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowLeft') resize(width + 10);
+          else if (event.key === 'ArrowRight') resize(width - 10);
+          else if (event.key === 'Home') resize(minWidth);
+          else if (event.key === 'End') resize(maxWidth);
+          else return;
+          event.preventDefault();
+        }}
+      />
       <div className="workspace__header">
         <span>文件</span>
         <button className="workspace__icon-button" type="button" onClick={() => setHidden(true)} aria-label="收起文件栏" title="收起文件栏"><PanelRightClose size={18} strokeWidth={1.6} /></button>
